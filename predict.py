@@ -83,7 +83,7 @@ with tf.Graph().as_default():
         gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=FLAGS.gpu_options)
         session_conf = tf.ConfigProto(allow_soft_placement=FLAGS.allow_soft_placement, log_device_placement=FLAGS.log_device_placement, gpu_options=gpu_options)
         with tf.Session(config=session_conf).as_default() as sess:
-            cnn = CNN_QA(FLAGS.batch_size, FLAGS.quest_len, embedding, FLAGS.embedding_size, filter_size, FLAGS.num_filters, num_feature, FLAGS.num_layers, unknown_id, model_type=FLAGS.modelType)
+            cnn = CNN_QA(FLAGS.batch_size, FLAGS.quest_len, embedding, FLAGS.embedding_size, filter_size, FLAGS.num_filters, num_feature, FLAGS.num_layers, unknown_id=unknown_id, model_type=FLAGS.modelType)
             global_step = tf.Variable(0, name="globle_step",trainable=False)
 
             #load model
@@ -93,8 +93,10 @@ with tf.Graph().as_default():
             if ckpt and ckpt.model_checkpoint_path:
                 saver.restore(sess, ckpt.model_checkpoint_path)
 
-            LR_path = build_path("./models/", FLAGS.data_type, FLAGS.modelType, FLAGS.num_layers, "-" + str(FLAGS.epoches) + "-LR.pkl")
-            lr = joblib.load(LR_path)
+            #LR_path = build_path("./models/", FLAGS.data_type, FLAGS.modelType, FLAGS.num_layers, "-" + str(FLAGS.epoches) + "-LR.pkl")
+            #lr = joblib.load(LR_path)
+            svr_path = build_path("./models/", FLAGS.data_type, FLAGS.modelType, FLAGS.num_layers, "-" + str(FLAGS.epoches) + "-svr.pkl")
+            svr = joblib.load(svr_path)
             #load model end
 
             optimizer = tf.train.GradientDescentOptimizer(1e-3)
@@ -120,8 +122,8 @@ with tf.Graph().as_default():
                 
             clf_features = np.concatenate(clf_features)
             clf_labels = np.concatenate(clf_labels)
-            clf_pred = lr.predict_proba(clf_features)[:, 1]
-            #clf_pred = lr.predict_proba(features)[:, 1]
+            #clf_pred = lr.predict_proba(clf_features)[:, 1]
+            clf_pred = svr.predict(clf_features)
             with codecs.open("../JIMI-DATA/ret.txt", "w", "utf-8") as wf:
                 idx = 0
                 for each in clf_pred:

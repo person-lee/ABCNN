@@ -7,7 +7,10 @@ import os
 import jieba
 import jieba.analyse 
 import traceback
+import math
+from LAT import LAT
 
+from collections import defaultdict
 from sklearn import feature_extraction  
 from sklearn.feature_extraction.text import TfidfTransformer  
 from sklearn.feature_extraction.text import CountVectorizer  
@@ -48,8 +51,9 @@ def cal_word2vec_sim(ori_quest, cand_quest, embeddings, word2idx):
     """
     calculate word2vec similarity of original question and candicate question
     """
-    ori_quest_emb = [embeddings[word2idx[word]] for word in ori_quest if len(word) != 0]
-    cand_quest_emb = [embeddings[word2idx[word]] for word in cand_quest if len(word) != 0]
+    unknownId = word2idx.get("UNKNOWN", 0)
+    ori_quest_emb = [embeddings[word2idx.get(word, unknownId)] for word in ori_quest if len(word) != 0]
+    cand_quest_emb = [embeddings[word2idx.get(word, unknownId)] for word in cand_quest if len(word) != 0]
     if len(ori_quest_emb) != 0 and len(cand_quest_emb) != 0:
         ori_mean_emb = np.mean(ori_quest_emb, 0)
         cand_mean_emb = np.mean(cand_quest_emb, 0)
@@ -58,48 +62,84 @@ def cal_word2vec_sim(ori_quest, cand_quest, embeddings, word2idx):
         score = 0
     return score
 
+def cal_tf(word, count):
+    return float(count.get(word)) / sum(count.values())
+
+def n_containing(word, count_list):
+    return sum(1 for count in count_list if word in count)
+
+def cal_idf(word, count_list):
+    return math.log(float(len(count_list)) / (1 + n_containing(word, count_list)))
+
+def cal_tfidf(word, count, count_list):
+    return cal_tf(word, count) * cal_idf(word, count_list)
+
 def cal_TFIDF(total_quests):
     """
     calculate tf-idf 
     """
-    tf, df = dict(), dict()
+    corpus = list()
+    words = set()
     for sents in total_quests:
-    vectorizer = CountVectorizer()
-    transformer = TfidfTransformer()
-    tfidf = transformer.fit_transform(vectorizer.fit_transform(total_quests))
-    word = vectorizer.get_feature_names()
-    weight = tfidf.toarray()
+        tf = defaultdict()
+        arr = sents.split(" ")
+        for word in arr:
+            if len(word.strip()) != 0:
+                words.add(word)
+                tf.setdefault(word, 0)
 
-    word2weight = {}
-    for row in np.arange(len(weight)):
-        for col in np.arange(len(word)):
-            word2weight[word[col]] = weight[row][col]
-    return word2weight
+                tf[word] += 1
+        corpus.append(tf)
 
-def cal_TFIDF_sim(ori_quest, cand_quest, word2weight):
+    word_idfs = defaultdict()
+    for word in words:
+        word_idf = cal_idf(word, corpus)
+        word_idfs[word] = word_idf
+    
+    return corpus, word_idfs
+
+def cal_TFIDF_sim(ori_quest, cand_quest, corpus):
     """
     calculate tf-idf similarity between original question and candicate question
     """
-    molecular, denominator = 0, 0
-    ori_quest_norm, cand_quest_norm = 0, 0
-    for idx in np.arange(len(ori_quest)):
-        if ori_quest[idx] in cand_quest:
-            molecular += np.power(word2weight[ori_quest[idx]], 2)
-        ori_quest_norm += np.power(word2weight[ori_quest[idx]], 2)
-        cand_quest_norm += np.power(word2weight[cand_quest[idx]], 2)
-    denominator = np.sqrt(ori_quest_norm) * np.sqrt(cand_quest_norm)
-    score = float(molecular) / denominator
-    
-    return score
+    try:
+        molecular, denominator = 0, 0
+        ori_quest_norm, cand_quest_norm = 0, 0
+        ori_dict, cand_dict = defaultdict(), defaultdict()
+        for idx in np.arange(len(ori_quest)):
+            ori_dict.setdefault(ori_quest[idx], 0)
+            ori_dict[ori_quest[idx]] += 1
 
-def cal_core_term_TFIDF_sim(ori_quests, cand_quests, word2weight, features, topK = 2):
+        for idx in np.arange(len(cand_quest)):
+            cand_dict.setdefault(cand_quest[idx], 0)
+            cand_dict[cand_quest[idx]] += 1
+
+        for idx in np.arange(len(ori_quest)):
+            if ori_quest[idx] in cand_quest:
+                if len(ori_quest[idx]) != 0:
+                    molecular += np.power(cal_tfidf(ori_quest[idx], ori_dict, corpus), 2)
+            ori_quest_norm += np.power(cal_tfidf(ori_quest[idx], ori_dict, corpus), 2)
+
+        for idx in np.arange(len(cand_quest)):
+            cand_quest_norm += np.power(cal_tfidf(cand_quest[idx], cand_dict, corpus), 2)
+
+        denominator = np.sqrt(ori_quest_norm) * np.sqrt(cand_quest_norm)
+        score = float(molecular) / denominator
+        return score
+    except Exception, e:
+        logging.error("cal_sent_word2vec_sim error" + traceback.format_exc())
+        return 0
+  
+    
+
+def cal_core_term_TFIDF_sim(ori_quests, cand_quests, corpus, features, topK = 2):
     """
     calculate core term by TF-IDF
     """
     for idx in np.arange(len(ori_quests)):
         ori_tags = jieba.analyse.extract_tags(ori_quests[idx], topK=topK)
         cand_tags = jieba.analyse.extract_tags(cand_quests[idx], topK=topK)
-        score = cal_TFIDF_sim(ori_tags, cand_tags, word2weight)
+        score = cal_TFIDF_sim(ori_tags, cand_tags, corpus)
         features[idx].append(score)
 
 def cal_sent_TFIDF_sim(ori_quests, cand_quests, word2weight, features):
@@ -107,9 +147,7 @@ def cal_sent_TFIDF_sim(ori_quests, cand_quests, word2weight, features):
     calculate core term by TF-IDF
     """
     for idx in np.arange(len(ori_quests)):
-        ori_tags = jieba.analyse.extract_tags(ori_quests[idx], topK=topK)
-        cand_tags = jieba.analyse.extract_tags(cand_quests[idx], topK=topK)
-        score = cal_TFIDF_sim(ori_tags, cand_tags, word2weight)
+        score = cal_TFIDF_sim(ori_quests[idx], cand_quests[idx], word2weight)
         features[idx].append(score)
 
 def cal_core_term_word2vec_sim(ori_quests, cand_quests, embeddings, word2idx, features, topK = 2):
@@ -119,7 +157,7 @@ def cal_core_term_word2vec_sim(ori_quests, cand_quests, embeddings, word2idx, fe
     for idx in np.arange(len(ori_quests)):
         ori_tags = jieba.analyse.extract_tags(ori_quests[idx], topK=topK)
         cand_tags = jieba.analyse.extract_tags(cand_quests[idx], topK=topK)
-        score = cal_word2vec_sim(ori_tags, cand_tags, embeddings, word2idx)
+        score = cal_word2vec_sim(cand_tags, ori_tags, embeddings, word2idx)
         features[idx].append(score)
 
 def cal_sent_word2vec_sim(ori_quests, cand_quests, embeddings, word2idx, features):
@@ -137,11 +175,36 @@ def cal_sent_word2vec_sim(ori_quests, cand_quests, embeddings, word2idx, feature
         except Exception, e:
             logging.error("cal_sent_word2vec_sim error" + traceback.format_exc())
 
-def cal_LAT_term():
+def cal_LAT_noun(ori_quests, cand_quests, lat, embeddings, word2idx, features):
     """
-    calculate LAT term 
+    calculate LAT noun term similarty 
     """
-    pass
+    try:
+        for idx in np.arange(len(ori_quests)):
+            ori_quest = ori_quests[idx]
+            cand_quest = cand_quests[idx]
+            ori_noun = lat.getLexicalAnswer(ori_quest)
+            cand_noun = lat.getLexicalAnswer(cand_quest)
+            score = cal_word2vec_sim(ori_noun, cand_noun, embeddings, word2idx)
+            features[idx].append(score)
+    except Exception, e:
+        logging.error("cal_lat_noun_sim error" + traceback.format_exc())
+    
+
+def cal_LAT_verb(ori_quests, cand_quests, lat, embeddings, word2idx, features):
+    """
+    calculate LAT verb term similarty 
+    """
+    try:
+        for idx in np.arange(len(ori_quests)):
+            ori_quest = ori_quests[idx]
+            cand_quest = cand_quests[idx]
+            ori_verb = lat.getLexicalAnswerVerb(ori_quest)
+            cand_verb = lat.getLexicalAnswerVerb(cand_quest)
+            score = cal_word2vec_sim(ori_verb, cand_verb, embeddings, word2idx)
+            features[idx].append(score)
+    except Exception, e:
+        logging.error("cal_lat_verb_sim error" + traceback.format_exc())
 
 def cal_same_terms(ori_quests, cand_quests, features):
     """
@@ -193,21 +256,30 @@ def load_embedding(filename, embedding_size):
                 embeddings.append(embedding)
 
         except Exception, e:
-            logging.error("load embedding Exception," , e)
+            logging.error("cal basic features error" + traceback.format_exc())
         finally:
             rf.close()
 
+    word2idx["UNKNOWN"] = len(idx2word)
+    idx2word[len(idx2word)] = "UNKNOWN"
+    word2idx["<a>"] = len(idx2word)
+    idx2word[len(idx2word)] = "<a>"
+
+    unknown_padding_embedding = np.random.normal(0, 0.1, (2,embedding_size))
+    embs = np.append(embeddings, unknown_padding_embedding.astype(np.float32), axis=0)
+
     logging.info("load embedding finish!")
-    return embeddings, word2idx, idx2word
+    return embs, word2idx, idx2word
 
 def sent_to_idx(sent, word2idx, sequence_len):
     """
     convert sentence to index array
     """
     unknown_id = word2idx.get("UNKNOWN", 0)
+    pad_id = word2idx.get("<a>", 0)
     sent2idx = [word2idx.get(word, unknown_id) for word in sent.split(" ")]
     if len(sent2idx) < sequence_len:
-        sent2idx_pad = np.concatenate([sent2idx, [unknown_id] * (sequence_len - len(sent2idx))])
+        sent2idx_pad = np.concatenate([sent2idx, [pad_id] * (sequence_len - len(sent2idx))])
     else:
         sent2idx_pad = sent2idx[:sequence_len]
     return sent2idx, sent2idx_pad
@@ -240,7 +312,7 @@ def load_train_data(filename, word2idx, quest_len, answer_len):
                 labels.append(label)
 
         except Exception, e:
-            logging.error("load train data Exception," + e)
+            logging.error("cal basic features error" + traceback.format_exc())
         finally:
             rf.close()
     logging.info("load train data finish!")
@@ -283,7 +355,7 @@ def load_test_data(filename, word2idx, quest_len, answer_len):
                 total_quests.append("".join(arr[1].split(" ")))
                 labels.append(label)
         except Exception, e:
-            logging.error("load test error," , e)
+            logging.error("cal basic features error" + traceback.format_exc())
         finally:
             rf.close()
     logging.info("load test data finish!")
@@ -315,7 +387,7 @@ def saveTFIDF2File(word2weights, filename):
         for word2weight in word2weights.items():
             word = word2weight[0]
             weight = word2weight[1]
-            wf.write(word + "\t" + weight + "\n")
+            wf.write(word + "\t" + str(weight) + "\n")
 
 def loadTfidfFromFile(tfidfFile):
     word2weight = {}
@@ -351,27 +423,37 @@ def cal_basic_feature(ori_quests, cand_quests, total_quests, embeddings, word2id
             #ori_sents, cand_sents = ori_quests, cand_quests
             total_sents.extend(ori_quests)
             total_sents.extend(cand_quests)
-            #if saveTfidf:
-            #    word2weight = cal_TFIDF(total_sents)
-            #    saveTFIDF2File(word2weight, tfidfFile)
-            #else:
-            #    word2weight = loadTfidfFromFile(tfidfFile)
+            if saveTfidf:
+                corpus, word_idfs = cal_TFIDF(total_sents)
+                saveTFIDF2File(word_idfs, tfidfFile)
+            else:
+                word_idfs = loadTfidfFromFile(tfidfFile)
+            logging.info("init idf success")
             features = init_feature(len(ori_sents))
 
             cal_Lcs(ori_sents, cand_sents, features)
+            logging.info("calculate lcs feature success")
             cal_length(ori_sents, features)
+            logging.info("calculate length of original question feature success")
             cal_length(cand_sents, features)
+            logging.info("calculate length of candicate question feature success")
             cal_same_terms(ori_sents, cand_sents, features)
+            logging.info("calculate same term feature success")
             cal_max_similarity_term(ori_sents, cand_sents, features)
-            #cal_core_term_TFIDF_sim(ori_quests, cand_quests, word2weight, features, topK = 2)
+            logging.info("calculate max similarity of term feature success")
+            #cal_core_term_TFIDF_sim(ori_quests, cand_quests, corpus, features, topK = 2)
             cal_core_term_word2vec_sim(ori_quests, cand_quests, embeddings, word2idx, features, topK = 2)
-            #cal_sent_TFIDF_sim(ori_sents, cand_sents, word2weight, features)
+            logging.info("calculate core term word2vec feature success")
+            cal_sent_TFIDF_sim(ori_sents, cand_sents, word_idfs, features)
+            logging.info("calculate sentence tfidf feature success")
             cal_sent_word2vec_sim(ori_sents, cand_sents, embeddings, word2idx, features)
+            logging.info("calculate sentence word2vec similarity feature success")
+            lat = LAT(word_idfs)
             logging.info("feature size:" + str(features[0]))
         else:
-            logging.error("original questions is empty")
+            logging.error("cal basic features error" + traceback.format_exc())
     except Exception, e:
-        logging.error("calculate feature exception," , e)
+        logging.error("cal basic features error" + traceback.format_exc())
     return features
 
 def segment(ori_quests, cand_quests):

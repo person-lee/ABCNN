@@ -7,7 +7,7 @@ from bilstm import BILSTM
 
 
 class CNN_QA(object):
-    def __init__(self, batch_size, seq_len, embeddings, embedding_size, filter_size, num_filters, num_features, num_layers, unknown_id=7447, num_classes=2, l2_reg_lambda=4e-4, model_type= "ABCNN3", adjust_weight=False,label_weight=[],is_training=True):
+    def __init__(self, batch_size, seq_len, embeddings, embedding_size, filter_size, num_filters, num_features, num_layers, rnn_size=100, unknown_id=7447, num_classes=2, l2_reg_lambda=4e-4, model_type= "ABCNN3", adjust_weight=False,label_weight=[],is_training=True):
         # define input variable
         self.batch_size = batch_size
         self.seq_len = seq_len 
@@ -23,6 +23,7 @@ class CNN_QA(object):
         self.adjust_weight = adjust_weight
         self.label_weight = label_weight
         self.is_training = is_training
+        self.rnn_size = rnn_size
 
         self.ori_input_quests = tf.placeholder(tf.int32, shape=[None, self.seq_len], name="ori_input")
         self.cand_input_quests = tf.placeholder(tf.int32, shape=[None, self.seq_len], name="cand_input")
@@ -48,9 +49,6 @@ class CNN_QA(object):
         #cand_quests_var =tf.nn.embedding_lookup(W, self.cand_input_quests_var)
 
         #shape [batch_size, embedding_size, seq_len, 1]
-        x1_expanded = tf.expand_dims(ori_quests, -1)
-        x2_expanded = tf.expand_dims(cand_quests, -1)
-
 
         #shape [batch_size, embedding_size]
         #LO_0 = all_pool("input-left", x1_expanded, self.seq_len, self.filter_size, self.num_filters, self.embedding_size)
@@ -58,6 +56,8 @@ class CNN_QA(object):
 
         # LI_1, RI_1 shape [batch, num_filters, seq_len, 1]
         # LO_1, RO_1 shape [batch, num_filters]
+        #x1_expanded = tf.expand_dims(ori_quests, -1)
+        #x2_expanded = tf.expand_dims(cand_quests, -1)
         #LO_1, RO_1 = CNN_layer("CNN-1", x1_expanded, x2_expanded, self.seq_len, self.embedding_size, self.num_filters, self.filter_size, self.l2_reg_lambda, self.model_type) 
         #with tf.variable_scope("cnn", reuse=None) as scope:
         #    LO_1 = CNN(x1_expanded, self.seq_len, self.embedding_size, self.filter_size, self.num_filters) 
@@ -65,38 +65,42 @@ class CNN_QA(object):
         #    RO_1 = CNN(x2_expanded, self.seq_len, self.embedding_size, self.filter_size, self.num_filters) 
 
         with tf.variable_scope("LSTM_scope", reuse=None):
-            ori_q = BILSTM(ori_quests, 100)
-            LO_2 = max_pooling(ori_q)
+            ori_q = BILSTM(ori_quests, self.rnn_size)
+            LO_1 = max_pooling(ori_q)
         with tf.variable_scope("LSTM_scope", reuse=True):
-            cand_a = BILSTM(cand_quests, 100)
-            RO_2 = max_pooling(cand_a)
+            cand_a = BILSTM(cand_quests, self.rnn_size)
+            RO_1 = max_pooling(cand_a)
         #self.sims = [cos_sim(LO_0, RO_0), cos_sim(LO_1, RO_1)]
         #self.sims = [cos_sim(LO_1, RO_1), cos_sim(LO_2, RO_2)]
-        self.sims = [cos_sim(LO_2, RO_2)]
+        self.sims = [cos_sim(LO_1, RO_1)]
 
-        #if self.num_layers > 1:
-        #    _, LO_2, _, RO_2 = CNN_layer("CNN-2", LI_1, RI_1, self.seq_len, self.num_filters, self.num_filters, self.filter_size, self.l2_reg_lambda, self.model_type)
-        #    self.test = LO_2
-        #    self.test2 = RO_2
-        #    self.sims.append(cos_sim(LO_2, RO_2))
+        if self.num_layers > 1:
+            with tf.variable_scope("cnn", reuse=None) as scope:
+                LO_2 = CNN(tf.expand_dims(ori_q, -1), self.seq_len, self.rnn_size * 2, self.filter_size, self.num_filters) 
+            with tf.variable_scope("cnn", reuse=True) as scope:
+                RO_2 = CNN(tf.expand_dims(cand_a, -1), self.seq_len, self.rnn_size * 2, self.filter_size, self.num_filters) 
+            self.sims.append(cos_sim(LO_2, RO_2))
 
-        #with tf.variable_scope("output_layer") as scope:
-        #    self.lstm_features = tf.concat(1, [self.features, tf.pack(self.sims, axis=1)], name="output_features")
-        self.lstm_features = tf.concat(1, [tf.concat(1, [LO_2, RO_2]), self.features])
+        with tf.variable_scope("output_layer") as scope:
+            self.output_features = tf.concat(1, [self.features, tf.pack(self.sims, axis=1)], name="output_features")
+        self.lstm_features = tf.concat(1, [LO_2, RO_2])
+        #self.lstm_features = self.output_features
 
+        self.num_classes = 1
         with tf.variable_scope("fully_connected"):
             #feature_len = int(self.output_features.get_shape()[1])
             feature_len = int(self.lstm_features.get_shape()[1])
             softmax_w = tf.get_variable("softmax_w", initializer=tf.truncated_normal([feature_len, self.num_classes], stddev=0.1))
             softmax_b = tf.get_variable("softmax_b", initializer=tf.constant(0., shape=[self.num_classes]))
             #self.estimation = tf.matmul(self.output_features, softmax_w) + softmax_b
-            self.estimation = tf.matmul(self.lstm_features, softmax_w) + softmax_b
-            self.output_features = tf.concat(1, [self.features, tf.nn.softmax(self.estimation)])
+            self.estimation = tf.nn.sigmoid(tf.matmul(self.lstm_features, softmax_w) + softmax_b)
+            #self.output_features = tf.concat(1, [self.features, tf.nn.softmax(self.estimation)])
             #self.output_features = tf.concat(1, [self.features, self.estimation])
 
         with tf.name_scope("loss"):
-            self.loss = tf.nn.sparse_softmax_cross_entropy_with_logits(self.estimation, self.labels)
-            self.cost = tf.reduce_mean(self.loss)
+            #self.loss = tf.nn.sparse_softmax_cross_entropy_with_logits(self.estimation, self.labels)
+            #self.cost = tf.reduce_mean(self.loss)
+            self.cost = tf.reduce_mean(tf.square(tf.cast(self.labels, "float32") - self.estimation))
 
 
     def assign_new_lr(self,session,lr_value):

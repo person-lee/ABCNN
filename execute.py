@@ -15,19 +15,23 @@ from data_helper import load_train_data, load_test_data, load_embedding, batch_i
 from polymerization import CNN_QA
 from utils import build_path
 from preprocess import Word2Vec, MSRP, WikiQA
+from sklearn.svm import SVR  
+from sklearn.model_selection import GridSearchCV  
 
 
 #------------------------- define parameter -----------------------------
-tf.flags.DEFINE_string("train_file", "../DATA/train.txt", "train corpus file")
-tf.flags.DEFINE_string("tfidf_file", "../DATA/tfidf.txt", "train corpus file")
-tf.flags.DEFINE_string("embedding_file", "../DATA/vectors.txt", "embedding file")
+tf.flags.DEFINE_string("train_file", "../JIMI-DATA/train.txt", "train corpus file")
+#tf.flags.DEFINE_string("train_file", "../JIMI-DATA/train_char.txt", "train corpus file")
+tf.flags.DEFINE_string("tfidf_file", "../JIMI-DATA/tfidf.txt", "train corpus file")
+tf.flags.DEFINE_string("embedding_file", "../JIMI-DATA/vectors.txt", "embedding file")
+#tf.flags.DEFINE_string("char_embedding_file", "../JIMI-DATA/char_vectors.txt", "embedding file")
 tf.flags.DEFINE_integer("embedding_size", 150, "embedding size")
 tf.flags.DEFINE_integer("num_filters", 100, "embedding size")
 tf.flags.DEFINE_string("filter_size", "1,2,3,4", "embedding size")
 tf.flags.DEFINE_float("dropout", 0.5, "the proportion of dropout")
 tf.flags.DEFINE_float("lr", 0.1, "the proportion of dropout")
 tf.flags.DEFINE_integer("batch_size", 128, "batch size of each batch")
-tf.flags.DEFINE_integer("epoches", 50, "epoches")
+tf.flags.DEFINE_integer("epoches", 1, "epoches")
 tf.flags.DEFINE_integer("evaluate_every", 1000, "run evaluation")
 tf.flags.DEFINE_integer("quest_len", 20, "embedding size")
 tf.flags.DEFINE_integer("num_layers", 2, "embedding size")
@@ -55,9 +59,10 @@ logger.addHandler(fh)
 
 #------------------------------------load data -------------------------------
 embedding, word2idx, idx2word = load_embedding(FLAGS.embedding_file, FLAGS.embedding_size)
+#char_embedding, char2idx, idx2char = load_embedding(FLAGS.char_embedding_file, FLAGS.embedding_size)
 ori_quests, cand_quests, labels, ori_quests_var, cand_quests_var, total_quests = load_train_data(FLAGS.train_file, word2idx, FLAGS.quest_len, FLAGS.quest_len)
 unknown_id = word2idx.get("UNKNOWN", 0)
-features = cal_basic_feature(ori_quests_var, cand_quests_var, total_quests, embedding, word2idx, saveTfidf=True, tfidfFile=FLAGS.tfidf_file)
+features = cal_basic_feature(ori_quests_var, cand_quests_var, total_quests, embedding, word2idx, saveTfidf=False, tfidfFile=FLAGS.tfidf_file)
 #cal_word2vec_sim(ori_quests_var, cand_quests_var, embedding, features)
 #cal_Lcs(ori_quests_var, cand_quests_var, features)
 num_feature = len(features[0])
@@ -112,7 +117,11 @@ with tf.Graph().as_default():
             #cur_lr = FLAGS.lr / (epoch + 1)
             #lstm.assign_new_lr(sess, cur_lr)
             epoch = 1
-            LR = linear_model.LogisticRegression()
+            #LR = linear_model.LogisticRegression(penalty='l2',C=1000)
+            #svr = GridSearchCV(SVR(kernel='rbf', gamma=1.0, C=1e3), cv=5,  
+            #       param_grid={#"C": [1e0, 1e1, 1e2, 1e3]})#,  
+            #                   "gamma": np.logspace(-2, 2, 5)})  
+            svr = SVR(kernel='rbf', gamma=1.0, C=1e3)
             for idx in np.arange(FLAGS.epoches):
                 clf_features = []
                 clf_labels = []
@@ -125,11 +134,15 @@ with tf.Graph().as_default():
                     
                 clf_features = np.concatenate(clf_features)
                 clf_labels = np.concatenate(clf_labels)
-            LR.fit(clf_features, clf_labels)
+            #LR.fit(clf_features, clf_labels)
+            svr.fit(clf_features, clf_labels)
             #LR.fit(features, labels)
 
-            LR_path = build_path("./models/", FLAGS.data_type, FLAGS.modelType, FLAGS.num_layers, "-" + str(epoch) + "-LR.pkl")
-            joblib.dump(LR, LR_path)
+            #LR_path = build_path("./models/", FLAGS.data_type, FLAGS.modelType, FLAGS.num_layers, "-" + str(epoch) + "-LR.pkl")
+            #joblib.dump(LR, LR_path)
+            svr_path = build_path("./models/", FLAGS.data_type, FLAGS.modelType, FLAGS.num_layers, "-" + str(epoch) + "-svr.pkl")
+            joblib.dump(svr, svr_path)
             path = saver.save(sess,checkpoint_prefix,global_step)
+            logger.info(svr.best_params_)
             logger.info("finished")
             #---------------------------------- end train -----------------------------------
