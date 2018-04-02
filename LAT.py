@@ -1,117 +1,100 @@
 #--*-- coding=utf-8 --*--
 
-from pyltp import Postagger
-from pyltp import Segmentor
+import jieba
+import jieba.posseg as psg
 import logging
+import numpy as np
+import codecs
 
 class LAT(object):
     """
     LAT分析：根据语法分析的结果，提取句子中的名词和动词
     判断句子相似度时，可根据提取的名词或者动词进行相似度比较
     """
-    def __init__(self, idf):
-        self.segmentor = Segmentor()
-        self.postagger = Postagger()
-
-        self.segmentor.load("")
-        logging.info("load segmentor sucess")
-        self.postagger.load("")
-        logging.info("load postagger sucess")
-
-        interrogative = "吗 么 呢 什么 多少 多 几"
-        speech = "n ns nl nz ws i b nd j q"
+    def __init__(self):
+        interrogative = u"吗 么 呢 什么 多少 多 几 啊 阿"
+        speech = u"i j n nd nh ni nl ns nt nz nr q eng"
         
         self.interrogativeSet = set(interrogative.split(" "))
         self.speechSet = set(speech.split(" "))
-        self.idf = idf
 
-    def segment(sent):
-        words = self.segmentor.segment(sent)
-        return words
+    def segment(self, sent):
+        words = jieba.cut(sent)
+        return list(words)
 
-    def postagger(words):
-        postags = self.postagger.postag(words)
-        return postags
+    def postaggerMethod(self, sent):
+        postags = list()
+        words = list()
+        for word, postag in psg.cut(sent):
+            words.append(word)
+            postags.append(postag)
+        return words, postags
 
-    def release():
-        self.segmentor.release()
-        logging.info("release segmentor success")
-        self.postagger.release()
-        logging.info("release postagger success")
-
-    def getInterrogativeIndex(postags):
-        """
-        获取疑问词的位置
-        """
-        interrogativeIdx = -1
-        interrogative = ""
-        
-        for idx in (len(postags) -1 - np.arange(len(postags))):
-            if postags[idx] in interrogativeSet:
-                interrogativeIdx = idx
-                interrogative = postags[idx]
-                break
-            idx += 1
-        return interrogativeIdx, interrogative
- 
-    def getLexicalAnswerVerb(sent):
+    def getLexicalAnswerVerb(self, sent, idf):
         """
         获得对应的动词
         """
-        words = segment(sent)
-        postags = postagger(words)
+        words, postags = self.postaggerMethod(sent)
 
-        verbIdx, verb = getLexicalAnswerIndexVerb(words, postags)
+        verbIdx, verb = self.getLexicalAnswerIndexVerb(words, postags, idf)
         return verb
 
-    def getLexicalAnswerIndexVerb(words, postags):
+    def getLexicalAnswerIndexVerb(self, words, postags, idf):
         """
         查询所有的焦点词
         通过idf权重选择最高的动词
         """
 
-        latIdxs = getLexicalAnswerIndex(words, postags)
+        latIdxs = self.getLexicalAnswerIndex(words, postags)
         maxLatIdx = 0
         for latIdx in latIdxs:
             if maxLatIdx < latIdx:
                 maxLatIdx = latIdx
 
+        word = words[maxLatIdx]
+        if word not in idf or idf[word] == 0:
+            return -1, ""
+
         boundary = max(maxLatIdx, 0)
         idx = len(words) - 1
         verbList = list()
-        while idx > boundary:
+        while idx > boundary:#查找名词右边的动词
             postag = postags[idx]
-            if postag == "v":
+            if postag == u"v":
                 verbList.append(idx)
             idx -= 1
  
-        maxVerbIdx = maxLatIdx 
-        maxVerbIdf = self.idf[words[maxLatIdx]]
+        maxVerbIdx = -1
+        maxVerbIdf = 0.
         for verbIdx in verbList:
-            wordIdf = self.idf[words[verbIdx]]
+            word = words[verbIdx]
+            if word not in idf:
+                continue
+            wordIdf = idf[word]
             if maxVerbIdf < wordIdf:
                 maxVerbIdx = verbIdx
                 maxVerbIdf = wordIdf
+        if maxVerbIdx == -1:
+            return -1, ""
+        else:
+            return maxVerbIdx, words[maxVerbIdx]
 
-        return maxVerbIdx, words[maxVerbIdx]
-
-    def getLexicalAnswer(sent):
+    def getLexicalAnswer(self, sent):
         """
         对外接口：获取全部名词
         """
-        words = segment(sent)
-        postags = postagger(words)
+        words, postags = self.postaggerMethod(sent)
 
         latWords = list()
-        lexicalIndexs = getLexicalAnswerIndex(words, postags)
-        if len(lexicalIndexs) != 0:
+        lexicalIndexs = self.getLexicalAnswerIndex(words, postags)
+        if len(lexicalIndexs) == 0:
             return latWords
         else:
             for idx in lexicalIndexs:
                 latWords.append(words[idx])
         return latWords
 
-    def getLexicalAnswerIndex(words, postags):
+    def getLexicalAnswerIndex(self, words, postags):
         """
         根据疑问词的位置寻找名词
         1：若疑问词存在
@@ -121,16 +104,16 @@ class LAT(object):
         """
         lexicalIndexs = list()
 
-        interrogativeIdx, interrogative = getInterrogativeIndex(postags)
+        interrogativeIdx, interrogative = self.getInterrogativeIndex(words)
         if interrogativeIdx == -1:
-            return -1
+            return lexicalIndexs
         else:
             idx = interrogativeIdx
             nounIdx = -1
             #先从疑问词右边开始找名词
             while idx < len(words):
                 postag = postags[idx]
-                if postag in speechSet:
+                if postag in self.speechSet:
                     nounIdx = idx
                     break
                 idx += 1
@@ -139,7 +122,7 @@ class LAT(object):
                 idx = interrogativeIdx
                 while idx >= 0:
                     postag = postags[idx]
-                    if postag in speechSet:
+                    if postag in self.speechSet:
                         nounIdx = idx
                         break
                     idx -= 1
@@ -149,8 +132,43 @@ class LAT(object):
                 lexicalIndexs.append(nounIdx)
                 while nounIdx > 1:
                     nounIdx -= 1
-                    postag = postags[idx]
-                    if postag not in speechSet:
+                    postag = postags[nounIdx]
+                    if postag not in self.speechSet:
                         break
                     lexicalIndexs.append(nounIdx)
         return lexicalIndexs
+
+    def getInterrogativeIndex(self, words):
+        """
+        获取疑问词的位置
+        """
+        interrogativeIdx = -1
+        interrogative = ""
+        
+        for idx in (len(words) -1 - np.arange(len(words))):
+            if words[idx] in self.interrogativeSet:
+                interrogativeIdx = idx
+                interrogative = words[idx]
+                break
+            idx += 1
+        return interrogativeIdx, interrogative
+
+def loadTfidfFromFile(tfidfFile):
+    word2weight = {}
+    with codecs.open(tfidfFile, "r", "utf-8") as rf:
+        for line in rf.readlines():
+            arr = line.split("\n")[0].split("\t")
+            word = arr[0]
+            weight = float(arr[1])
+            word2weight[word] = weight
+    return word2weight
+
+if __name__ == "__main__":
+    lat = LAT()
+    sent = "这款电脑可以挂墙上吗 ？"
+    nouns = lat.getLexicalAnswer(sent)
+    idf = loadTfidfFromFile("../JIMI-DATA/tfidf.txt")
+    verb = lat.getLexicalAnswerVerb(sent, idf)
+    print verb
+    for noun in nouns:
+        print noun

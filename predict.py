@@ -18,18 +18,19 @@ from utils import build_path
 
 
 #------------------------- define parameter -----------------------------
-tf.flags.DEFINE_string("test_file", "../JIMI-DATA/test.txt", "train corpus file")
+tf.flags.DEFINE_string("test_file", "../JIMI-DATA/test_char.txt", "train corpus file")
 tf.flags.DEFINE_string("tfidf_file", "../JIMI-DATA/tfidf.txt", "train corpus file")
 tf.flags.DEFINE_string("embedding_file", "../JIMI-DATA/vectors.txt", "embedding file")
+tf.flags.DEFINE_string("char_embedding_file", "../JIMI-DATA/char_vectors.txt", "embedding file")
 tf.flags.DEFINE_integer("embedding_size", 150, "embedding size")
-tf.flags.DEFINE_integer("num_filters", 100, "embedding size")
+tf.flags.DEFINE_integer("num_filters", 128, "embedding size")
 tf.flags.DEFINE_string("filter_size", "1,2,3,4", "embedding size")
 tf.flags.DEFINE_float("dropout", 0.5, "the proportion of dropout")
 tf.flags.DEFINE_float("lr", 0.1, "the proportion of dropout")
 tf.flags.DEFINE_integer("batch_size", 128, "batch size of each batch")
 tf.flags.DEFINE_integer("epoches", 1, "epoches")
 tf.flags.DEFINE_integer("evaluate_every", 1000, "run evaluation")
-tf.flags.DEFINE_integer("quest_len", 20, "embedding size")
+tf.flags.DEFINE_integer("quest_len", 30, "embedding size")
 tf.flags.DEFINE_integer("num_layers", 2, "embedding size")
 tf.flags.DEFINE_string("out_dir", "save/", "output directory")
 tf.flags.DEFINE_string("modelType", "BCNN", "output directory")
@@ -55,18 +56,22 @@ logger.addHandler(fh)
 
 #------------------------------------load data -------------------------------
 embedding, word2idx, idx2word = load_embedding(FLAGS.embedding_file, FLAGS.embedding_size)
+char_embedding, char2idx, idx2char = load_embedding(FLAGS.char_embedding_file, FLAGS.embedding_size)
 
-ori_quests, cand_quests, labels, ori_quests_var, cand_quests_var, total_quests = load_test_data(FLAGS.test_file, word2idx, FLAGS.quest_len, FLAGS.quest_len)
+ori_quests, cand_quests, labels, ori_quests_char, cand_quests_char = load_test_data(FLAGS.test_file, word2idx, char2idx, FLAGS.quest_len, FLAGS.quest_len)
 unknown_id = word2idx.get("UNKNOWN", 0)
-features = cal_basic_feature(ori_quests_var, cand_quests_var, total_quests, embedding, word2idx, saveTfidf=False, tfidfFile=FLAGS.tfidf_file)
+total_sents = []
+ori_sents, cand_sents, features = cal_basic_feature(ori_quests, cand_quests, total_sents, embedding, word2idx, saveTfidf=False, tfidfFile=FLAGS.tfidf_file, sequence_len=FLAGS.quest_len)
 num_feature = len(features[0])
 #----------------------------------- load data end ----------------------
 
 #----------------------------------- execute train model ---------------------------------
-def test_step(sess, ori_batch, cand_batch, features_batch, t_labels, cnn, dropout=1.):
+def test_step(sess, ori_batch, cand_batch, features_batch, t_labels, ori_train_char, cand_train_char, cnn, dropout=1.):
     feed_dict = {
         cnn.ori_input_quests : ori_batch,
         cnn.cand_input_quests : cand_batch, 
+        cnn.ori_input_quests_char : ori_train_char,
+        cnn.cand_input_quests_char : cand_train_char, 
         cnn.features: features_batch,
         cnn.labels : t_labels,
         cnn.keep_prob : dropout
@@ -83,7 +88,7 @@ with tf.Graph().as_default():
         gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=FLAGS.gpu_options)
         session_conf = tf.ConfigProto(allow_soft_placement=FLAGS.allow_soft_placement, log_device_placement=FLAGS.log_device_placement, gpu_options=gpu_options)
         with tf.Session(config=session_conf).as_default() as sess:
-            cnn = CNN_QA(FLAGS.batch_size, FLAGS.quest_len, embedding, FLAGS.embedding_size, filter_size, FLAGS.num_filters, num_feature, FLAGS.num_layers, unknown_id=unknown_id, model_type=FLAGS.modelType)
+            cnn = CNN_QA(FLAGS.batch_size, FLAGS.quest_len, embedding, char_embedding, FLAGS.embedding_size, filter_size, FLAGS.num_filters, num_feature, FLAGS.num_layers, unknown_id=unknown_id, model_type=FLAGS.modelType)
             global_step = tf.Variable(0, name="globle_step",trainable=False)
 
             #load model
@@ -93,10 +98,10 @@ with tf.Graph().as_default():
             if ckpt and ckpt.model_checkpoint_path:
                 saver.restore(sess, ckpt.model_checkpoint_path)
 
-            #LR_path = build_path("./models/", FLAGS.data_type, FLAGS.modelType, FLAGS.num_layers, "-" + str(FLAGS.epoches) + "-LR.pkl")
-            #lr = joblib.load(LR_path)
-            svr_path = build_path("./models/", FLAGS.data_type, FLAGS.modelType, FLAGS.num_layers, "-" + str(FLAGS.epoches) + "-svr.pkl")
-            svr = joblib.load(svr_path)
+            LR_path = build_path("./models/", FLAGS.data_type, FLAGS.modelType, FLAGS.num_layers, "-" + str(FLAGS.epoches) + "-LR.pkl")
+            lr = joblib.load(LR_path)
+            #svr_path = build_path("./models/", FLAGS.data_type, FLAGS.modelType, FLAGS.num_layers, "-" + str(FLAGS.epoches) + "-svr.pkl")
+            #svr = joblib.load(svr_path)
             #load model end
 
             optimizer = tf.train.GradientDescentOptimizer(1e-3)
@@ -113,17 +118,18 @@ with tf.Graph().as_default():
             #predict
             clf_features = []
             clf_labels = []
-            for batch_data in batch_iter(zip(ori_quests, cand_quests, features, labels), FLAGS.batch_size, epoches=1, shuffle=False):
+            for batch_data in batch_iter(zip(ori_sents, cand_sents, features, labels, ori_quests_char, cand_quests_char), FLAGS.batch_size, epoches=1, shuffle=False):
 
-                ori_train, cand_train, batch_features, batch_train_labels = zip(*batch_data)
-	        output_features = test_step(sess, ori_train, cand_train, batch_features, batch_train_labels, cnn, FLAGS.dropout)
+                ori_train, cand_train, batch_features, batch_train_labels, ori_train_char, cand_train_char = zip(*batch_data)
+	        output_features = test_step(sess, ori_train, cand_train, batch_features, batch_train_labels, ori_train_char, cand_train_char, cnn, FLAGS.dropout)
+                #output_features = batch_features
                 clf_features.append(output_features)
                 clf_labels.append(batch_train_labels)
                 
             clf_features = np.concatenate(clf_features)
             clf_labels = np.concatenate(clf_labels)
-            #clf_pred = lr.predict_proba(clf_features)[:, 1]
-            clf_pred = svr.predict(clf_features)
+            clf_pred = lr.predict_proba(clf_features)[:, 1]
+            #clf_pred = svr.predict(clf_features)
             with codecs.open("../JIMI-DATA/ret.txt", "w", "utf-8") as wf:
                 idx = 0
                 for each in clf_pred:

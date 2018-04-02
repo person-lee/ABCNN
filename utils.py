@@ -200,7 +200,7 @@ def lcs(input_x, input_y):
     return c[lena][lenb], commList
 
 if __name__ == "__main__":
-    print lcs_continous("1112223", "1223331")
+    print lcs_continuous("1112223", "1223331")
     print lcs("1112223", "1223331")
 
 

@@ -9,6 +9,7 @@ import jieba.analyse
 import traceback
 import math
 from LAT import LAT
+from multiprocessing import Pool, Manager 
 
 from collections import defaultdict
 from sklearn import feature_extraction  
@@ -21,6 +22,33 @@ from utils import np_cos_sim, lcs_continuous, lcs
 
 # define a logger
 logging.basicConfig(format="%(message)s", level=logging.INFO)
+
+def cutword(context):
+    if context is None or len(context.strip()) == 0:
+        return None
+
+    sentence = ""
+    phrases = context.split("\t")[0].split(" ")
+    for phrase in phrases:
+        flag = True
+        for word in phrase:
+            if 'A' <= word <= 'Z' or word == '_':
+                continue
+            else:
+                flag = False
+                break
+        if flag:
+            sentence += phrase + " "
+        else:
+            for word in phrase:
+                sentence += word + " "
+
+    return sentence
+
+def dosent(quest, length, padding):
+    words = cutword(quest)
+    #words = jieba_cutword(quest)
+    return words
 
 def init_feature(num):
     features = []
@@ -43,8 +71,8 @@ def cal_length(ori_quests, features, max_len = 50):
     calculate the length of original question and candicate question
     """
     for idx in np.arange(len(ori_quests)):
-        ori_quest = [each for each in ori_quests[idx]]
-        score = float(len(ori_quest)) / max_len
+        ori_quest = [len(each) for each in ori_quests[idx]]
+        score = float(sum(ori_quest)) / max_len
         features[idx].append(score)
 
 def cal_word2vec_sim(ori_quest, cand_quest, embeddings, word2idx):
@@ -74,7 +102,55 @@ def cal_idf(word, count_list):
 def cal_tfidf(word, count, count_list):
     return cal_tf(word, count) * cal_idf(word, count_list)
 
-def cal_TFIDF(total_quests):
+def calculate_tf(sents, lst):
+    tf = defaultdict()
+    arr = sents.split(" ")
+    for word in arr:
+        if len(word.strip()) != 0:
+            word_lst.append(word)
+            tf.setdefault(word, 0)
+
+            tf[word] += 1
+    lst.append(tf)
+
+def async_cal_IDF(total_quests):
+    global manager
+    manager = Manager()
+    global word_lst
+    word_lst = manager.list()
+    global lst
+    lst = manager.list()
+    pool = Pool(processes=200)
+
+    for sents in total_quests:
+        pool.apply_async(calculate_tf, args=(sents, lst))
+    pool.close()
+    pool.join()
+
+    corpus = list(lst)
+    lst = None
+    words = set(word_lst)
+    word_lst = None
+    logging.info("tf cal success, words:" + str(len(words)) + ", corpus size:" + str(len(corpus)))
+
+    global word_idf_dict
+    word_idf_dict = manager.dict()
+    pool1 = Pool(processes=2)
+    for word in words:
+        pool1.apply_async(calculate_IDF, args=(word, corpus, word_idf_dict))
+    pool1.close()
+    pool1.join()
+    word_idfs = dict(word_idf_dict)
+    word_idf_dict = None
+    logging.info("word idfs size:" + str(len(word_idfs)))
+    
+    return corpus, word_idfs
+
+def calculate_IDF(word, corpus, word_idf_dict):
+    word_idf = cal_idf(word, corpus)
+    word_idf_dict[word] = word_idf
+
+def cal_IDF(total_quests):
     """
     calculate tf-idf 
     """
@@ -82,14 +158,15 @@ def cal_TFIDF(total_quests):
     words = set()
     for sents in total_quests:
         tf = defaultdict()
-        arr = sents.split(" ")
-        for word in arr:
+        for word in sents:
             if len(word.strip()) != 0:
                 words.add(word)
                 tf.setdefault(word, 0)
 
                 tf[word] += 1
         corpus.append(tf)
+
+    logging.info("tf cal success, corpus size:" + str(len(corpus)) + ", words size:" + str(len(words)))
 
     word_idfs = defaultdict()
     for word in words:
@@ -130,8 +207,6 @@ def cal_TFIDF_sim(ori_quest, cand_quest, corpus):
         logging.error("cal_sent_word2vec_sim error" + traceback.format_exc())
         return 0
   
-    
-
 def cal_core_term_TFIDF_sim(ori_quests, cand_quests, corpus, features, topK = 2):
     """
     calculate core term by TF-IDF
@@ -191,7 +266,7 @@ def cal_LAT_noun(ori_quests, cand_quests, lat, embeddings, word2idx, features):
         logging.error("cal_lat_noun_sim error" + traceback.format_exc())
     
 
-def cal_LAT_verb(ori_quests, cand_quests, lat, embeddings, word2idx, features):
+def cal_LAT_verb(ori_quests, cand_quests, idf, lat, embeddings, word2idx, features):
     """
     calculate LAT verb term similarty 
     """
@@ -199,9 +274,23 @@ def cal_LAT_verb(ori_quests, cand_quests, lat, embeddings, word2idx, features):
         for idx in np.arange(len(ori_quests)):
             ori_quest = ori_quests[idx]
             cand_quest = cand_quests[idx]
-            ori_verb = lat.getLexicalAnswerVerb(ori_quest)
-            cand_verb = lat.getLexicalAnswerVerb(cand_quest)
+            ori_verb = lat.getLexicalAnswerVerb(ori_quest, idf)
+            cand_verb = lat.getLexicalAnswerVerb(cand_quest, idf)
             score = cal_word2vec_sim(ori_verb, cand_verb, embeddings, word2idx)
+            features[idx].append(score)
+    except Exception, e:
+        logging.error("cal_lat_verb_sim error" + traceback.format_exc())
+
+def cal_LAT(ori_quests, cand_quests, idf, lat, embeddings, word2idx, features):
+    try:
+        for idx in np.arange(len(ori_quests)):
+            ori_quest = ori_quests[idx]
+            cand_quest = cand_quests[idx]
+            ori_verb = lat.getLexicalAnswerVerb(ori_quest, idf)
+            cand_verb = lat.getLexicalAnswerVerb(cand_quest, idf)
+            ori_noun = lat.getLexicalAnswer(ori_quest)
+            cand_noun = lat.getLexicalAnswer(cand_quest)
+            score = cal_word2vec_sim(ori_noun.append(ori_verb), cand_noun.append(cand_verb), embeddings, word2idx)
             features[idx].append(score)
     except Exception, e:
         logging.error("cal_lat_verb_sim error" + traceback.format_exc())
@@ -277,14 +366,53 @@ def sent_to_idx(sent, word2idx, sequence_len):
     """
     unknown_id = word2idx.get("UNKNOWN", 0)
     pad_id = word2idx.get("<a>", 0)
-    sent2idx = [word2idx.get(word, unknown_id) for word in sent.split(" ")]
+    sent2idx = [word2idx.get(word, unknown_id) for word in sent]
     if len(sent2idx) < sequence_len:
         sent2idx_pad = np.concatenate([sent2idx, [pad_id] * (sequence_len - len(sent2idx))])
     else:
         sent2idx_pad = sent2idx[:sequence_len]
     return sent2idx, sent2idx_pad
 
-def load_train_data(filename, word2idx, quest_len, answer_len):
+def load_train_data(filename, char2idx, char_len):
+    """
+    load train data
+    """
+    ori_quests, cand_quests, ori_quests_char, cand_quests_char, labels = [], [], [], [], []
+    with codecs.open(filename, mode="r", encoding="utf-8") as rf:
+        try:
+            for line in rf.readlines():
+                arr = line.strip().split("\n")[0].split("\t")
+                if len(arr) != 3:# or arr[0] != "1":
+                    logging.error("invalid data:%s"%(line))
+                    continue
+
+                ori_quest = arr[0]
+                cand_quest = arr[1]
+                if len(ori_quest.strip()) == 0 or len(cand_quest.strip()) == 0:
+                    continue
+                label = int(arr[2])
+                if label not in[0, 1]:
+                    continue
+
+                ori_char = dosent(ori_quest, None, None)
+                cand_char = dosent(cand_quest, None, None)
+                _, ori_idx = sent_to_idx(ori_char, char2idx, char_len)
+                _, cand_idx = sent_to_idx(cand_char, char2idx, char_len)
+
+                ori_quests_char.append(ori_idx)
+                cand_quests_char.append(cand_idx)
+                ori_quests.append(ori_quest)
+                cand_quests.append(cand_quest)
+                labels.append(label)
+
+        except Exception, e:
+            logging.error("cal basic features error" + traceback.format_exc())
+        finally:
+            rf.close()
+    logging.info("load train data finish!")
+    return ori_quests, cand_quests, labels, ori_quests_char, cand_quests_char
+
+def load_train_data_bak(filename, word2idx, quest_len, answer_len):
     """
     load train data
     """
@@ -330,11 +458,11 @@ def create_valid(data, proportion=0.1):
     seperate_idx = int(data_len * (1 - proportion))
     return data[:seperate_idx], data[seperate_idx:]
 
-def load_test_data(filename, word2idx, quest_len, answer_len):
+def load_test_data(filename, word2idx, char2idx, quest_len, answer_len):
     """
     load test data
     """
-    ori_quests, cand_quests, labels, ori_quests_var, cand_quests_var, total_quests = [], [], [], [], [], []
+    ori_quests, cand_quests, labels, ori_quests_char, cand_quests_char = [], [], [], [], []
     with codecs.open(filename, mode="r", encoding="utf-8") as rf:
         try:
             for line in rf.readlines():
@@ -343,23 +471,27 @@ def load_test_data(filename, word2idx, quest_len, answer_len):
                     logging.error("invalid data:%s"%(line))
                     continue
 
-                ori_quest, ori_quest_pad = sent_to_idx(arr[0], word2idx, quest_len)
-                cand_quest, cand_quest_pad = sent_to_idx(arr[1], word2idx, answer_len)
+                if len(arr[0].strip()) == 0 or len(arr[1].strip()) == 0:
+                    continue
+                ori_quest, cand_quest = arr[0].strip(), arr[1].strip()
                 label = int(arr[3])
 
-                ori_quests.append(ori_quest_pad)
-                cand_quests.append(cand_quest_pad)
-                ori_quests_var.append(arr[0])
-                cand_quests_var.append(arr[1])
-                total_quests.append("".join(arr[0].split(" ")))
-                total_quests.append("".join(arr[1].split(" ")))
+                ori_char = dosent(ori_quest, None, None)
+                cand_char = dosent(cand_quest, None, None)
+                _, ori_idx = sent_to_idx(ori_char, char2idx, quest_len)
+                _, cand_idx = sent_to_idx(cand_char, char2idx, quest_len)
+
+                ori_quests.append(ori_quest)
+                cand_quests.append(cand_quest)
+                ori_quests_char.append(ori_idx)
+                cand_quests_char.append(cand_idx)
                 labels.append(label)
         except Exception, e:
             logging.error("cal basic features error" + traceback.format_exc())
         finally:
             rf.close()
     logging.info("load test data finish!")
-    return ori_quests, cand_quests, labels, ori_quests_var, cand_quests_var, total_quests
+    return ori_quests, cand_quests, labels, ori_quests_char, cand_quests_char
 
 def gen_neg_quest(ori_quests, cand_quests, neg_num = 5):
     num = len(ori_quests)
@@ -388,6 +520,7 @@ def saveTFIDF2File(word2weights, filename):
             word = word2weight[0]
             weight = word2weight[1]
             wf.write(word + "\t" + str(weight) + "\n")
+    logging.info("save idf feature success")
 
 def loadTfidfFromFile(tfidfFile):
     word2weight = {}
@@ -399,8 +532,22 @@ def loadTfidfFromFile(tfidfFile):
             word2weight[word] = weight
     return word2weight
 
-def cal_basic_feature(ori_quests, cand_quests, total_quests, embeddings, word2idx, saveTfidf = False, tfidfFile = None):
+def quest_to_idx(ori_quests, cand_quests, word2idx, sequence_len):
+    ori_idxs, cand_idxs = list(), list()  
+    for idx in np.arange(len(ori_quests)):
+        ori_quest = ori_quests[idx]
+        cand_quest = cand_quests[idx]
+        _, ori_idx = sent_to_idx(ori_quest, word2idx, sequence_len)
+        _, cand_idx = sent_to_idx(cand_quest, word2idx, sequence_len)
+        ori_idxs.append(ori_idx)
+        cand_idxs.append(cand_idx)
+    return ori_idxs, cand_idxs
+
+def cal_basic_feature(ori_quests, cand_quests, total_sents, embeddings, word2idx, saveTfidf = False, tfidfFile = None, sequence_len=30):
     """
+    ori_quests : original question "i am li lei"
+    cand_quests : candicate question "my name is han meimei"
+
     calculate basic featrue
     1:the length of original question
     2:the length of candicate question
@@ -418,13 +565,19 @@ def cal_basic_feature(ori_quests, cand_quests, total_quests, embeddings, word2id
     num = len(ori_quests)
     try:
         if num != 0:
-            total_sents = list()
+            lat = LAT()
+            logging.info("initial lat sucess")
+      
             ori_sents, cand_sents = segment(ori_quests, cand_quests)
+            ori_idxs, cand_idxs = quest_to_idx(ori_sents, cand_sents, word2idx, sequence_len)
             #ori_sents, cand_sents = ori_quests, cand_quests
-            total_sents.extend(ori_quests)
-            total_sents.extend(cand_quests)
+            total_sents = list()
+            total_sents.extend(ori_sents)
+            total_sents.extend(cand_sents)
             if saveTfidf:
-                corpus, word_idfs = cal_TFIDF(total_sents)
+                #corpus, word_idfs = async_cal_IDF(total_sents)
+                corpus, word_idfs = cal_IDF(total_sents)
+                logging.info("calculate idf feature success")
                 saveTFIDF2File(word_idfs, tfidfFile)
             else:
                 word_idfs = loadTfidfFromFile(tfidfFile)
@@ -448,22 +601,42 @@ def cal_basic_feature(ori_quests, cand_quests, total_quests, embeddings, word2id
             logging.info("calculate sentence tfidf feature success")
             cal_sent_word2vec_sim(ori_sents, cand_sents, embeddings, word2idx, features)
             logging.info("calculate sentence word2vec similarity feature success")
-            lat = LAT(word_idfs)
+            cal_LAT_noun(ori_quests, cand_quests, lat, embeddings, word2idx, features)
+            logging.info("calculate lat noun similary success")
+            cal_LAT_verb(ori_quests, cand_quests, word_idfs, lat, embeddings, word2idx, features)
+            #cal_LAT(ori_quests, cand_quests, word_idfs, lat, embeddings, word2idx, features)
+            logging.info("calculate lat verb similary success")
             logging.info("feature size:" + str(features[0]))
         else:
             logging.error("cal basic features error" + traceback.format_exc())
     except Exception, e:
         logging.error("cal basic features error" + traceback.format_exc())
-    return features
+    return ori_idxs, cand_idxs, features
+
+def load_log(filename):
+    corpus = list()
+    data = set()
+    with codecs.open(filename, "r", "utf-8") as rf:
+        for line in rf.readlines():
+            line = line.split("\r\n")[0]
+            if line in data:
+                continue
+            else:
+                data.add(line)
+            sent = [word for word in line.split(" ") if len(word.strip()) != 0]
+            #sent = line.split("\r\n")[0].strip()
+            corpus.append(sent)
+        logging.info("corpus size:" + str(len(corpus)))
+    return list(corpus)
 
 def segment(ori_quests, cand_quests):
     #jieba.enable_parallel(20)
     ori_terms, cand_terms = list(), list()
     for idx in np.arange(len(ori_quests)):
-        #ori_quest = [each for each in jieba.cut(ori_quests[idx])]
-        #cand_quest = [each for each in jieba.cut(cand_quests[idx])]
-        ori_quest = ori_quests[idx].split(" ")
-        cand_quest = cand_quests[idx].split(" ")
+        ori_quest = [each for each in jieba.cut(ori_quests[idx])]
+        cand_quest = [each for each in jieba.cut(cand_quests[idx])]
+        #ori_quest = ori_quests[idx].split(" ")
+        #cand_quest = cand_quests[idx].split(" ")
         
         ori_terms.append(ori_quest)
         cand_terms.append(cand_quest)
